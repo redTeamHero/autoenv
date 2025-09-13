@@ -5,9 +5,40 @@
 #   ./setup_venv.sh                          # run inside project (env name: venv)
 #   ./setup_venv.sh /path/to/project         # from anywhere (env: venv)
 #   ./setup_venv.sh /path/to/project .venv   # custom env name
+#   ./setup_venv.sh uninstall                # remove the auto-activate hook from your shell RC
+#
+# Notes:
+# - To exit a virtualenv at any time: `deactivate`
+# - Avoid `pip --user` inside a venv (it will fail).
 # ============================================
 
 set -euo pipefail
+
+# --- Uninstall mode: remove the hook from ~/.bashrc or ~/.zshrc by marker ---
+if [[ "${1:-}" == "uninstall" ]]; then
+  # Pick the right RC
+  SHELL_RC="$HOME/.bashrc"
+  [[ -n "${ZSH_VERSION-}" ]] && SHELL_RC="$HOME/.zshrc"
+  [[ ! -f "$SHELL_RC" ]] && { echo "No $SHELL_RC found."; exit 0; }
+
+  # Remove any blocks between our markers
+  if grep -q "Auto-manage venv \[" "$SHELL_RC"; then
+    tmp="$(mktemp)"
+    # Delete every block bounded by our markers
+    awk '
+      BEGIN{skip=0}
+      /# >>> Auto-manage venv \[/ {skip=1}
+      skip==0 {print}
+      /# <<< Auto-manage venv \[/ {skip=0}
+    ' "$SHELL_RC" > "$tmp"
+    mv "$tmp" "$SHELL_RC"
+    echo "Removed auto-activate hooks from $SHELL_RC"
+    echo "Reload your shell: source \"$SHELL_RC\""
+  else
+    echo "No auto-activate hooks found in $SHELL_RC"
+  fi
+  exit 0
+fi
 
 # -------- Args --------
 PROJECT_DIR="${1:-$PWD}"
@@ -37,8 +68,8 @@ if [ "$safe_dirname" != "$orig_dirname" ]; then
   mv "$PROJECT_DIR" "$parent_dir/$safe_dirname"
   PROJECT_DIR="$parent_dir/$safe_dirname"
 
-  # If we were *in* that directory, move our shell there too
-  if [ "$PWD" != "/" ] && [ "$(cd "$PWD" && pwd)" = "$parent_dir/$orig_dirname" ] 2>/dev/null; then
+  # If we were *in* that directory, move our shell there too (robust check)
+  if [ "$(pwd -P)" = "$parent_dir/$orig_dirname" ]; then
     cd "$PROJECT_DIR"
   fi
 fi
@@ -62,10 +93,12 @@ source "$ENV_NAME/bin/activate"
 
 # -------- Pip + requirements --------
 echo ">>> Upgrading pip..."
+# Avoid any odd user-install bleed; inside venv this is safe and isolated
 pip install --upgrade pip
 
 if [ -f "requirements.txt" ]; then
   echo ">>> Installing dependencies from requirements.txt..."
+  # No --user here (it breaks in venv)
   pip install -r requirements.txt
 else
   echo ">>> No requirements.txt found — skipping dependency install."
@@ -79,10 +112,11 @@ fi
 touch "$SHELL_RC"
 
 # -------- Unique hook id from path hash --------
-hash_id="$( \
+hash_id="$(
   { command -v md5sum >/dev/null && printf "%s" "$PROJECT_DIR" | md5sum | awk '{print $1}'; } || \
   { command -v md5    >/dev/null && md5 -q -s "$PROJECT_DIR"; } || \
-  { command -v shasum >/dev/null && printf "%s" "$PROJECT_DIR" | shasum | awk '{print $1}'; } \
+  { command -v shasum >/dev/null && printf "%s" "$PROJECT_DIR" | shasum | awk '{print $1}'; } || \
+  echo "nohash"
 )"
 
 MARKER="Auto-manage venv [$hash_id]"
@@ -102,14 +136,16 @@ $FUNC_NAME() {
   case "\$PWD/" in
     "\$project_dir"/*)
       if [ -f "\$env_path/bin/activate" ]; then
+        # Activate only if not already active
         if [ -z "\${VIRTUAL_ENV-}" ] || [ "\$VIRTUAL_ENV" != "\$env_path" ]; then
           echo "(auto) Activating: \$env_path"
           # shellcheck disable=SC1090
-          source "\$env_path/bin/activate"
+          . "\$env_path/bin/activate"
         fi
       fi
       ;;
     *)
+      # If we leave the project while that env is active, deactivate it
       if [ -n "\${VIRTUAL_ENV-}" ] && [ "\$VIRTUAL_ENV" = "\$env_path" ]; then
         echo "(auto) Deactivating: \$env_path"
         deactivate
@@ -124,10 +160,18 @@ if [ -n "\${ZSH_VERSION-}" ]; then
   if command -v add-zsh-hook >/dev/null 2>&1; then
     add-zsh-hook precmd $FUNC_NAME
   else
-    PROMPT_COMMAND="$FUNC_NAME;\$PROMPT_COMMAND"
+    if [ -n "\${PROMPT_COMMAND-}" ]; then
+      PROMPT_COMMAND="$FUNC_NAME;\$PROMPT_COMMAND"
+    else
+      PROMPT_COMMAND="$FUNC_NAME"
+    fi
   fi
 else
-  PROMPT_COMMAND="$FUNC_NAME;\$PROMPT_COMMAND"
+  if [ -n "\${PROMPT_COMMAND-}" ]; then
+    PROMPT_COMMAND="$FUNC_NAME;\$PROMPT_COMMAND"
+  else
+    PROMPT_COMMAND="$FUNC_NAME"
+  fi
 fi
 # <<< $MARKER <<<
 EOF
